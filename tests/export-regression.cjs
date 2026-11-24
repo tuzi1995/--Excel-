@@ -55,6 +55,7 @@ function fixture(bytes, annotations = []) {
   return {
     edits: state.sheetState.数据.edits,
     export: () => vm.runInContext('buildExportBuffer()', ctx),
+    inspect: bytes => vm.runInContext('(async bytes => { const w = new ExcelJS.Workbook(); await w.xlsx.load(bytes); const s = w.getWorksheet("数据"); return Object.fromEntries(["A2", "B2", "C2"].map(a => { const c = s.getCell(a); return [a, { formula: c.value?.formula, value: c.value?.result ?? c.value, color: c.font?.color?.argb, note: c.note, richText: c.value?.richText }]; })); })', ctx)(bytes),
     async returnToSource(candidate, changedDuringExport = null) {
       let written;
       const file = (buf, lastModified) => new File([buf], state.fileName, { lastModified });
@@ -110,29 +111,38 @@ test('回传生成期间源文件被另一个程序修改时不覆盖', async ()
   assert.equal(result.kind, 'err');
 });
 
-test('公式和数字的标注写为批注，文本仍可导出彩色标注', async () => {
+test('标注回传只写颜色、不添加批注；公式数字保留并整格着色', async () => {
   const source = workbook([['数字', '公式', '文本'], [3, 6, '标注文本']], s => { s.B2.f = 'A2*2'; });
   const app = fixture(source, [
     ['1,0', [{ s: 0, e: 1, ci: 0, anchor: '3' }]],
     ['1,1', [{ s: 0, e: 1, ci: 0, anchor: '6' }]],
     ['1,2', [{ s: 0, e: 2, ci: 0, anchor: '标注' }]],
   ]);
-  const result = read(await app.export());
+  const bytes = await app.export();
+  const result = read(bytes);
+  const styles = await app.inspect(bytes);
   assert.equal(result.B2.f, 'A2*2');
   assert.equal(result.B2.v, 6);
-  assert.match(result.B2.c[0].t, /6/);
+  assert.equal(result.B2.c, undefined);
+  assert.equal(styles.B2.color, 'FFD54941');
   assert.equal(result.A2.t, 'n');
   assert.equal(result.A2.v, 3);
-  assert.match(result.A2.c[0].t, /3/);
+  assert.equal(result.A2.c, undefined);
+  assert.equal(styles.A2.color, 'FFD54941');
   assert.equal(result.C2.v, '标注文本');
   assert.match(result.C2.r, /<rPr>/);
+  assert.equal(result.C2.c, undefined);
+  assert.equal(styles.C2.note, undefined);
 });
 
-test('只有公式被标注时也保留公式和批注', async () => {
+test('只有公式被标注时也保留公式并着色，不添加批注', async () => {
   const source = workbook([['数字', '公式'], [3, 6]], s => { s.B2.f = 'A2*2'; });
   const app = fixture(source, [['1,1', [{ s: 0, e: 1, ci: 0, anchor: '6' }]]]);
-  const result = read(await app.export());
+  const bytes = await app.export();
+  const result = read(bytes);
+  const styles = await app.inspect(bytes);
   assert.equal(result.B2.f, 'A2*2');
   assert.equal(result.B2.v, 6);
-  assert.ok(result.B2.c.some(note => note.t.includes('6')));
+  assert.equal(result.B2.c, undefined);
+  assert.equal(styles.B2.color, 'FFD54941');
 });

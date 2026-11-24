@@ -764,7 +764,7 @@ function downloadBlob(blob, name) {
       const card = rowEl.querySelector(`.card[data-c="${c}"]`);
       if (card) fillCard(card, r, c);
     }
-    toast(btn.classList.contains('clear') ? '已清除本格标注' : '已标注。导出时文本保留颜色，公式和数字保留批注', 'ok');
+    toast(btn.classList.contains('clear') ? '已清除本格标注' : '已标注。回传时文本按选中范围着色，公式和数字整格着色', 'ok');
   });
 })();
 
@@ -2484,15 +2484,20 @@ function annotationRichTextRuns(text, anns) {
 }
 
 async function applyAnnotationRichText(buf, annotatedCells) {
-  if (!annotatedCells.some(cell => cell.colorText) || typeof ExcelJS === 'undefined') return buf;
+  if (!annotatedCells.length || typeof ExcelJS === 'undefined') return buf;
   const wbk = new ExcelJS.Workbook();
   await wbk.xlsx.load(buf);
-  annotatedCells.forEach(({ sheet, addr, text, anns, note, colorText }) => {
+  annotatedCells.forEach(({ sheet, addr, text, anns, colorText }) => {
     const ws = wbk.getWorksheet(sheet);
     if (!ws) return;
     const cell = ws.getCell(addr);
-    if (colorText) cell.value = { richText: annotationRichTextRuns(text, anns) };
-    if (note) cell.note = note;
+    if (colorText) {
+      cell.value = { richText: annotationRichTextRuns(text, anns) };
+      return;
+    }
+    // 数字和公式不支持局部富文本：保留值/公式，只给整个单元格套用首个标注颜色。
+    const colorMark = anns.find(a => ANN_COLORS[a.ci]?.argb);
+    if (colorMark) cell.font = { ...(cell.font || {}), color: { argb: ANN_COLORS[colorMark.ci].argb } };
   });
   return new Uint8Array(await wbk.xlsx.writeBuffer());
 }
@@ -2542,13 +2547,6 @@ async function buildExportBuffer(sourceBytes = state.fileBytes) {
         const cell = ws[addr] || { t: 's', v: '' };
         const edited = !!ss?.edits.has(k);
         const text = edited ? String(ss.edits.get(k)) : String(cell.w ?? cell.v ?? '');
-        const note = anns.map(a => {
-          const s = Math.max(0, Math.min(a.s, text.length));
-          const e = Math.max(s, Math.min(a.e, text.length));
-          const marked = a.anchor || text.slice(s, e);
-          return `${ANN_COLORS[a.ci]?.name || '标注'}：${marked}`;
-        }).filter(Boolean).join('\n');
-        if (note) cell.c = [...(cell.c || []), { a: '标注', t: note }];
         const exported = edited ? valueForExport(sn, r, c, text, wbk) : cell.v;
         const isText = typeof exported === 'string' && (edited || cell.t === 's' || cell.t === 'str');
         const isMergedChild = (ws['!merges'] || []).some(m =>
@@ -2556,9 +2554,7 @@ async function buildExportBuffer(sourceBytes = state.fileBytes) {
           (r !== m.s.r - origin.r || c !== m.s.c - origin.c));
         const colorText = isText && cell.f == null && cell.F == null && text === exported && !isMergedChild;
         if (!isMergedChild) {
-          // 若因其他文本格需要由 ExcelJS 重写，也显式补回公式、数字格的批注。
-          const combinedNote = (cell.c || []).map(comment => comment.t).filter(Boolean).join('\n');
-          annotatedCells.push({ sheet: sn, addr, text, anns, note: combinedNote, colorText });
+          annotatedCells.push({ sheet: sn, addr, text, anns, colorText });
         }
         ws[addr] = cell;
       });
@@ -2577,7 +2573,7 @@ async function buildExportBuffer(sourceBytes = state.fileBytes) {
     });
   });
   const buf = verifyExportBuffer(XLSX.write(wbk, { bookType: 'xlsx', type: 'array', compression: true }));
-  // ExcelJS 负责批注/富文本时会重新写 ZIP；对历史版本生成的异常主题再做
+  // ExcelJS 负责富文本/单元格颜色时会重新写 ZIP；对历史版本生成的异常主题再做
   // 一次边界校验，避免把膨胀的 theme1.xml 回传给办公软件。
   const annotated = await applyAnnotationRichText(buf, annotatedCells);
   return sanitizeXlsxTheme(annotated === buf ? buf : verifyExportBuffer(annotated));
@@ -2751,7 +2747,7 @@ $('#exConfirm').onclick = async () => {
       const buf = await buildExportBuffer();
       downloadBlob(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), outName);
       $('#exportModal').style.display = 'none';
-      toast(`已导出：${outName}${n ? `（${n} 处标注已作为批注写入）` : ''}`, 'ok');
+      toast(`已导出：${outName}${n ? `（${n} 处标注以颜色写入）` : ''}`, 'ok');
     } else {
       // 示例数据没有原始文件字节时，保留原有 SheetJS 导出兜底。
       state.sheetNames.forEach(sn => {
